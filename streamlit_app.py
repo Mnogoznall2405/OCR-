@@ -10,6 +10,12 @@ import requests
 from PIL import Image
 from pathlib import Path
 from dotenv import load_dotenv
+from fpdf import FPDF
+from docx import Document
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+import shutil
+import datetime
 
 # Загружаем переменные из .env файла если он существует
 load_dotenv()
@@ -18,10 +24,14 @@ load_dotenv()
 CACHE_DIR = Path('cache')
 HISTORY_DIR = Path('history')
 STATS_FILE = Path('stats.json')
+INPUT_WATCH_DIR = Path('input_watch')
+OUTPUT_RESULTS_DIR = Path('output_results')
 
 # Создаем необходимые директории
 CACHE_DIR.mkdir(exist_ok=True)
 HISTORY_DIR.mkdir(exist_ok=True)
+INPUT_WATCH_DIR.mkdir(exist_ok=True)
+OUTPUT_RESULTS_DIR.mkdir(exist_ok=True)
 
 # Настройка страницы
 st.set_page_config(
@@ -435,6 +445,33 @@ def export_to_txt(text: str) -> str:
     
     return export_file
 
+# Функция для экспорта текста в PDF
+def export_to_pdf(text: str, translated_text: str = None) -> str:
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    export_file = f"export_{timestamp}.pdf"
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, "Оригинальный текст:\n" + text)
+    if translated_text:
+        pdf.ln(5)
+        pdf.multi_cell(0, 10, "Перевод:\n" + translated_text)
+    pdf.output(export_file)
+    return export_file
+
+# Функция для экспорта текста в DOCX
+def export_to_docx(text: str, translated_text: str = None) -> str:
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    export_file = f"export_{timestamp}.docx"
+    doc = Document()
+    doc.add_heading('Оригинальный текст', level=2)
+    doc.add_paragraph(text)
+    if translated_text:
+        doc.add_heading('Перевод', level=2)
+        doc.add_paragraph(translated_text)
+    doc.save(export_file)
+    return export_file
+
 # Функция для применения CSS-стилей
 def apply_custom_css():
     st.markdown("""
@@ -573,6 +610,58 @@ def apply_custom_css():
         transform: translateY(-4px);
         box-shadow: 0 6px 12px rgba(0,0,0,0.1);
     }
+    
+    @media (max-width: 900px) {
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.5rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            font-size: 1rem;
+            padding: 0.3rem 0.7rem;
+        }
+        .stButton button, .stDownloadButton button {
+            font-size: 1.1rem;
+            padding: 0.7rem 1.2rem;
+        }
+        .stTextArea textarea {
+            font-size: 1.1rem;
+        }
+        .result-container, .translated-container, .card {
+            padding: 0.7rem;
+        }
+        .preview-image {
+            max-height: 180px;
+        }
+    }
+    @media (max-width: 600px) {
+        .stTabs [data-baseweb="tab-list"] {
+            flex-direction: column;
+            gap: 0.2rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            width: 100%;
+            font-size: 1rem;
+        }
+        .stButton button, .stDownloadButton button {
+            width: 100%;
+            font-size: 1.2rem;
+            padding: 1rem 0.5rem;
+        }
+        .stTextArea textarea {
+            font-size: 1.2rem;
+            min-height: 120px;
+        }
+        .result-container, .translated-container, .card {
+            padding: 0.5rem;
+            margin-top: 0.7rem;
+        }
+        .preview-image {
+            max-height: 120px;
+        }
+        .stColumns {
+            flex-direction: column !important;
+        }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -633,6 +722,35 @@ def analyze_text(text: str) -> dict:
         "punctuation_count": punctuation_count,
         "common_words": common_words
     }
+
+def show_text_visualizations(text_stats, text, key_prefix=""):
+    # Облако слов
+    words = [w for w in text.lower().split() if len(w) > 2]
+    if words:
+        wordcloud = WordCloud(width=400, height=200, background_color='white').generate(' '.join(words))
+        st.markdown("#### ☁️ Облако слов")
+        fig_wc, ax_wc = plt.subplots(figsize=(6, 3))
+        ax_wc.imshow(wordcloud, interpolation='bilinear')
+        ax_wc.axis('off')
+        st.pyplot(fig_wc, clear_figure=True)
+    # Круговая диаграмма
+    st.markdown("#### 🥧 Распределение символов")
+    labels = ['Буквы', 'Цифры', 'Пробелы', 'Пунктуация']
+    sizes = [text_stats['letters_count'], text_stats['digits_count'], text_stats['spaces_count'], text_stats['punctuation_count']]
+    fig_pie, ax_pie = plt.subplots()
+    ax_pie.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
+    ax_pie.axis('equal')
+    st.pyplot(fig_pie, clear_figure=True)
+    # Гистограмма длины слов
+    st.markdown("#### 📊 Длина слов")
+    import re
+    word_lengths = [len(w) for w in re.findall(r'\b\w+\b', text)]
+    if word_lengths:
+        fig_hist, ax_hist = plt.subplots()
+        ax_hist.hist(word_lengths, bins=range(1, max(word_lengths)+2), color='#4361ee', edgecolor='black')
+        ax_hist.set_xlabel('Длина слова')
+        ax_hist.set_ylabel('Количество')
+        st.pyplot(fig_hist, clear_figure=True)
 
 # Основной интерфейс приложения
 def main():
@@ -728,223 +846,329 @@ def main():
     
     # Вкладка распознавания
     with tab1:
+        # Кнопка для пакетной обработки из папки
+        if st.button('📂 Обработать все файлы из папки input_watch', use_container_width=True):
+            files = list(INPUT_WATCH_DIR.glob('*'))
+            if not files:
+                st.info('В папке input_watch нет файлов для обработки.')
+            else:
+                st.info(f'Найдено файлов: {len(files)}. Начинаем обработку...')
+                for file in files:
+                    try:
+                        with open(file, 'rb') as f:
+                            file_data = f.read()
+                        if not check_file_size(file_data):
+                            st.warning(f'{file.name}: файл слишком большой, пропущен.')
+                            continue
+                        start_time = time.time()
+                        settings = {
+                            'language': 'en',
+                            'optimize': True,
+                            'use_cache': True,
+                            'enhance_contrast': False,
+                            'remove_noise': False,
+                            'start_time': start_time
+                        }
+                        result = process_image(file_data, settings)
+                        processing_time = f"{time.time() - start_time:.2f} сек."
+                        success = 'error' not in result
+                        update_stats(success, len(file_data))
+                        if success:
+                            original_text = result['text']
+                            detected_language = result.get('detected_language', 'auto')
+                            # Сохраняем результат в output_results
+                            out_name = OUTPUT_RESULTS_DIR / f"{file.stem}_result.txt"
+                            with open(out_name, 'w', encoding='utf-8') as out_f:
+                                out_f.write(original_text)
+                            st.success(f'{file.name}: успешно обработан!')
+                        else:
+                            st.error(f'{file.name}: ошибка обработки.')
+                        # Перемещаем файл в архив
+                        shutil.move(str(file), str(INPUT_WATCH_DIR / f"_done_{file.name}"))
+                    except Exception as e:
+                        st.error(f'{file.name}: {str(e)}')
+        
         # Колонки для разделения загрузки и предпросмотра
         col_upload, col_preview = st.columns([2, 1])
         
         with col_upload:
-            # Загрузка файла
-            uploaded_file = st.file_uploader("Выберите изображение или PDF файл", 
+            # Загрузка файлов (множественный выбор)
+            uploaded_files = st.file_uploader("Выберите изображения или PDF файлы", 
                                         type=['png', 'jpg', 'jpeg', 'pdf'],
                                         help="Поддерживаются форматы PNG, JPG и PDF",
                                         label_visibility="collapsed",
-                                        accept_multiple_files=False)
+                                        accept_multiple_files=True)
             
-            # Информация о лимите размера файла
             st.caption("Лимит 1МБ на файл • PNG, JPG, JPEG, PDF")
             
-            if uploaded_file is not None:
-                # Проверяем размер файла
-                file_data = uploaded_file.getvalue()
-                if not check_file_size(file_data):
-                    st.error("⚠️ Файл слишком большой. Максимальный размер - 1 МБ.")
-                elif st.button("🔍 Распознать текст", type="primary", use_container_width=True):
-                    with st.spinner("⏳ Обработка изображения..."):
-                        start_time = time.time()
-                        
-                        # Настройки для распознавания
-                        settings = {
-                            'language': 'en',
-                            'optimize': optimize,
-                            'use_cache': use_cache,
-                            'enhance_contrast': enhance_contrast,
-                            'remove_noise': remove_noise,
-                            'start_time': start_time  # Запоминаем время начала обработки
-                        }
-                        
-                        # Обработка изображения
-                        result = process_image(file_data, settings)
-                        
-                        # Время обработки
-                        processing_time = f"{time.time() - start_time:.2f} сек."
-                        
-                        # Обновляем статистику
-                        success = 'error' not in result
-                        update_stats(success, len(file_data))
-                        
-                        # Отображаем результат
-                        if success:
-                            original_text = result['text']
-                            detected_language = result.get('detected_language', 'auto')
-                            
-                            # Переводим текст всегда
-                            translated_text = None
-                            target_language = None
-                            
-                            with st.spinner("🌐 Перевод текста..."):
-                                # Если в тексте есть кириллица - переводим на английский, иначе на русский
-                                if any(char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for char in original_text):
-                                    source_lang = 'ru'
-                                    target_language = 'en'
-                                else:
-                                    source_lang = 'en'
-                                    target_language = 'ru'
-                                
-                                if original_text.strip():
-                                    translated_text = translate_text(original_text, source_lang, target_language)
-                            
-                            # Сохраняем в историю
-                            save_to_history(
-                                file_data, 
-                                original_text, 
-                                detected_language, 
-                                processing_time,
-                                translated_text,
-                                target_language
-                            )
-                            
-                            st.success(f"✅ Текст успешно распознан за {processing_time}")
-                            
-                            # Отображаем распознанный текст
-                            source_lang_name = SUPPORTED_LANGUAGES.get(detected_language, "Автоопределенный")
-                            st.markdown(f"### 📄 Распознанный текст ({source_lang_name})")
-                            st.markdown('<div class="result-container">', unsafe_allow_html=True)
-                            st.text_area("Распознанный текст", original_text, height=200, label_visibility="collapsed")
-                            st.markdown('</div>', unsafe_allow_html=True)
-                            
-                            # Отображаем переведенный текст, если он есть
-                            if translated_text:
-                                target_lang_name = TRANSLATION_LANGUAGES.get(target_language, "")
-                                st.markdown(f"### 🌐 Перевод на {target_lang_name}")
-                                st.markdown('<div class="translated-container">', unsafe_allow_html=True)
-                                st.text_area("Переведенный текст", translated_text, height=200, key="translated_text", label_visibility="collapsed")
-                                st.markdown('</div>', unsafe_allow_html=True)
-                            
-                            # Анализ текста и статистика
-                            st.markdown("### 📊 Анализ текста")
-                            
-                            # Получаем статистику текста
-                            text_stats = analyze_text(original_text)
-                            
-                            # Отображаем статистику в красивом виде
-                            col_stats1, col_stats2, col_stats3 = st.columns(3)
-                            
-                            with col_stats1:
-                                st.markdown('<div class="card">', unsafe_allow_html=True)
-                                st.subheader("📝 Базовая статистика")
-                                st.metric("Символов", text_stats["chars_count"])
-                                st.metric("Слов", text_stats["words_count"])
-                                st.metric("Строк", text_stats["lines_count"])
-                                st.metric("Абзацев", text_stats["paragraphs_count"])
-                                st.markdown('</div>', unsafe_allow_html=True)
-                            
-                            with col_stats2:
-                                st.markdown('<div class="card">', unsafe_allow_html=True)
-                                st.subheader("🔤 Состав текста")
-                                st.metric("Букв", text_stats["letters_count"])
-                                st.metric("Цифр", text_stats["digits_count"])
-                                st.metric("Пробелов", text_stats["spaces_count"])
-                                st.metric("Знаков пунктуации", text_stats["punctuation_count"])
-                                st.markdown('</div>', unsafe_allow_html=True)
-                            
-                            with col_stats3:
-                                st.markdown('<div class="card">', unsafe_allow_html=True)
-                                st.subheader("📚 Частотный анализ")
-                                if text_stats["common_words"]:
-                                    for word, count in text_stats["common_words"]:
-                                        st.metric(f'"{word}"', count)
-                                else:
-                                    st.info("Недостаточно данных для анализа")
-                                st.markdown('</div>', unsafe_allow_html=True)
-                            
-                            # Визуализация данных
-                            if text_stats["chars_count"] > 0:
-                                st.markdown("### 📈 Визуализация состава текста")
-                                
-                                # Данные для диаграммы
-                                chart_data = {
-                                    'Категория': ['Буквы', 'Цифры', 'Пробелы', 'Знаки пунктуации'],
-                                    'Количество': [
-                                        text_stats["letters_count"], 
-                                        text_stats["digits_count"], 
-                                        text_stats["spaces_count"], 
-                                        text_stats["punctuation_count"]
-                                    ]
-                                }
-                                chart_df = pd.DataFrame(chart_data)
-                                
-                                # Отображаем диаграмму
-                                st.bar_chart(chart_df.set_index('Категория'))
-                            
-                            # Кнопки для экспорта
-                            st.divider()
-                            col1, col2 = st.columns(2)
-                            
-                            # Экспорт в TXT
-                            if col1.button("📄 Экспорт в TXT", use_container_width=True):
-                                # Если есть перевод, включаем оба текста
-                                export_content = original_text
-                                if translated_text:
-                                    export_content += f"\n\nПЕРЕВОД:\n{translated_text}"
-                                    
-                                export_file = export_to_txt(export_content)
-                                with open(export_file, "rb") as file:
-                                    col1.download_button(
-                                        label="⬇️ Скачать TXT",
-                                        data=file,
-                                        file_name=export_file,
-                                        mime="text/plain",
-                                        use_container_width=True
-                                    )
-                            
-                            # Копировать в буфер обмена
-                            if col2.button("📋 Копировать текст", use_container_width=True):
-                                st.toast("📋 Текст скопирован в буфер обмена!")
-                        else:
-                            st.error(f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}")
+            if uploaded_files:
+                # Кнопка для запуска пакетной обработки
+                if st.button("🔍 Распознать все файлы", type="primary", use_container_width=True):
+                    for idx, uploaded_file in enumerate(uploaded_files):
+                        if not check_rate_limit():
+                            st.error("Превышен лимит: не более 10 обработок в минуту. Подождите немного.")
+                            break
+                        file_data = uploaded_file.getvalue()
+                        with st.spinner(f"⏳ Обработка файла {uploaded_file.name} ({idx+1}/{len(uploaded_files)})..."):
+                            if not check_file_size(file_data):
+                                st.error(f"⚠️ Файл {uploaded_file.name} слишком большой. Максимальный размер - 1 МБ.")
+                                continue
+                            start_time = time.time()
+                            settings = {
+                                'language': 'en',
+                                'optimize': optimize,
+                                'use_cache': use_cache,
+                                'enhance_contrast': enhance_contrast,
+                                'remove_noise': remove_noise,
+                                'start_time': start_time
+                            }
+                            result = process_image(file_data, settings)
+                            processing_time = f"{time.time() - start_time:.2f} сек."
+                            success = 'error' not in result
+                            update_stats(success, len(file_data))
+                            if success:
+                                original_text = result['text']
+                                detected_language = result.get('detected_language', 'auto')
+                                translated_text = None
+                                target_language = None
+                                # Не переводим автоматически, только сохраняем результат
+                                save_to_history(
+                                    file_data, 
+                                    original_text, 
+                                    detected_language, 
+                                    processing_time,
+                                    translated_text,
+                                    target_language
+                                )
+                                st.success(f"✅ {uploaded_file.name}: Текст успешно распознан за {processing_time}")
+                            else:
+                                st.error(f"❌ {uploaded_file.name}: {result.get('error', 'Неизвестная ошибка')}")
         
-        # Предпросмотр изображения
+        # Предпросмотр всех загруженных файлов
         with col_preview:
-            if uploaded_file is not None:
-                if uploaded_file.type.startswith('image/'):
-                    st.markdown("### 🖼️ Предпросмотр")
-                    st.markdown('<div class="preview-container">', unsafe_allow_html=True)
-                    st.image(file_data, caption=uploaded_file.name, use_container_width=True, output_format="JPEG")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                elif uploaded_file.type == 'application/pdf':
-                    st.info("📑 Загружен PDF-файл. Предпросмотр недоступен.")
-                    st.markdown(f"**Имя файла:** {uploaded_file.name}")
-                    st.markdown(f"**Размер:** {round(len(file_data) / 1024, 2)} КБ")
+            if uploaded_files:
+                st.markdown("### 🖼️ Предпросмотр файлов")
+                for uploaded_file in uploaded_files:
+                    if uploaded_file.type.startswith('image/'):
+                        st.image(uploaded_file.getvalue(), caption=uploaded_file.name, use_container_width=True, output_format="JPEG")
+                    elif uploaded_file.type == 'application/pdf':
+                        st.info(f"📑 PDF: {uploaded_file.name}")
+                        st.markdown(f"**Размер:** {round(len(uploaded_file.getvalue()) / 1024, 2)} КБ")
+        
+        # Отображение результатов последней пакетной обработки
+        if 'last_batch_results' in st.session_state:
+            st.markdown("---")
+            st.markdown("## 📝 Результаты пакетной обработки")
+            for idx, res in enumerate(st.session_state['last_batch_results']):
+                if not res.get('success'):
+                    continue
+                st.markdown(f"### 📄 {res['file_name']}")
+                # Редактируемый текст
+                edited_text = st.text_area(
+                    f"Распознанный текст ({res['file_name']})",
+                    res['original_text'],
+                    height=150,
+                    key=f"edit_text_{idx}",
+                    label_visibility="collapsed"
+                )
+                # Выбор языка перевода
+                lang_options = [(code, name) for code, name in TRANSLATION_LANGUAGES.items() if code != res.get('detected_language', 'en')]
+                default_lang = 'en' if res.get('detected_language', 'auto') == 'ru' else 'ru'
+                selected_lang = st.selectbox(
+                    f"Язык перевода для {res['file_name']}",
+                    options=lang_options,
+                    index=[i for i, (code, _) in enumerate(lang_options) if code == default_lang][0] if any(code == default_lang for code, _ in lang_options) else 0,
+                    format_func=lambda x: x[1],
+                    key=f"lang_select_{idx}"
+                )[0]
+                # Кнопка перевода
+                if st.button(f"🌐 Перевести ({res['file_name']})", key=f"translate_btn_{idx}", use_container_width=True):
+                    with st.spinner("Переводим текст..."):
+                        # Определяем исходный язык
+                        if any(char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for char in edited_text):
+                            source_lang = 'ru'
+                        else:
+                            source_lang = 'en'
+                        translated_text = translate_text(edited_text, source_lang, selected_lang)
+                        # Сохраняем результат в сессию для отображения
+                        if 'translated_results' not in st.session_state:
+                            st.session_state['translated_results'] = {}
+                        st.session_state['translated_results'][idx] = {
+                            'translated_text': translated_text,
+                            'target_language': selected_lang,
+                            'edited_text': edited_text
+                        }
+                        # Сохраняем в историю
+                        save_to_history(
+                            res['file_data'],
+                            edited_text,
+                            res.get('detected_language', 'auto'),
+                            res['processing_time'],
+                            translated_text,
+                            selected_lang
+                        )
+                        st.success("Текст переведён и сохранён в историю!")
+                # Показываем перевод, если он есть
+                if 'translated_results' in st.session_state and idx in st.session_state['translated_results']:
+                    t_res = st.session_state['translated_results'][idx]
+                    lang_name = TRANSLATION_LANGUAGES.get(t_res['target_language'], t_res['target_language'])
+                    st.text_area(
+                        f"Переведённый текст ({lang_name}) — {res['file_name']}",
+                        t_res['translated_text'],
+                        height=150,
+                        key=f"translated_text_{idx}",
+                        label_visibility="collapsed"
+                    )
+                    # Кнопки экспорта
+                    col_exp1, col_exp2, col_exp3 = st.columns(3)
+                    export_content = t_res['edited_text']
+                    translated_content = t_res['translated_text']
+                    if col_exp1.button(f"📄 Экспорт в TXT — {res['file_name']}", key=f"export_txt_{idx}", use_container_width=True):
+                        txt_file = export_to_txt(export_content + (f"\n\nПЕРЕВОД:\n{translated_content}" if translated_content else ""))
+                        with open(txt_file, "rb") as file:
+                            col_exp1.download_button(
+                                label="⬇️ Скачать TXT",
+                                data=file,
+                                file_name=txt_file,
+                                mime="text/plain",
+                                key=f"download_txt_{idx}",
+                                use_container_width=True
+                            )
+                    if col_exp2.button(f"📝 Экспорт в DOCX — {res['file_name']}", key=f"export_docx_{idx}", use_container_width=True):
+                        docx_file = export_to_docx(export_content, translated_content)
+                        with open(docx_file, "rb") as file:
+                            col_exp2.download_button(
+                                label="⬇️ Скачать DOCX",
+                                data=file,
+                                file_name=docx_file,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"download_docx_{idx}",
+                                use_container_width=True
+                            )
+                    if col_exp3.button(f"📑 Экспорт в PDF — {res['file_name']}", key=f"export_pdf_{idx}", use_container_width=True):
+                        pdf_file = export_to_pdf(export_content, translated_content)
+                        with open(pdf_file, "rb") as file:
+                            col_exp3.download_button(
+                                label="⬇️ Скачать PDF",
+                                data=file,
+                                file_name=pdf_file,
+                                mime="application/pdf",
+                                key=f"download_pdf_{idx}",
+                                use_container_width=True
+                            )
+                # Анализ и визуализация текста
+                st.markdown("### 📊 Анализ текста")
+                text_stats = analyze_text(edited_text)
+                show_text_visualizations(text_stats, edited_text, key_prefix=f"{idx}_")
+                st.caption(f"⏱️ Время обработки: {res['processing_time']}")
+                st.divider()
     
     # Вкладка истории
     with tab2:
         st.subheader("📜 История распознавания")
-        
-        # Кнопка обновления истории
-        if st.button("🔄 Обновить историю", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        
-        # Загружаем историю
+        # Фильтрация и поиск
         history = load_history()
-        
-        if not history:
-            st.info("📭 История пуста. Распознайте текст, чтобы увидеть историю.")
+        if history:
+            col_f1, col_f2, col_f3 = st.columns(3)
+            search_query = col_f1.text_input("Поиск по тексту или имени файла", key="search_hist")
+            lang_filter = col_f2.selectbox("Язык", options=["Все"] + list(TRANSLATION_LANGUAGES.values()), key="lang_hist")
+            only_with_translation = col_f3.checkbox("Только с переводом", key="trans_hist")
+            # Фильтрация
+            filtered_history = []
+            for item in history:
+                match = True
+                if search_query:
+                    if search_query.lower() not in item.get('text', '').lower() and search_query.lower() not in item.get('timestamp', '').lower():
+                        match = False
+                if lang_filter != "Все":
+                    if TRANSLATION_LANGUAGES.get(item.get('language', ''), item.get('language', '')) != lang_filter:
+                        match = False
+                if only_with_translation and 'translated_text' not in item:
+                    match = False
+                if match:
+                    filtered_history.append(item)
+            # Экспорт всей истории
+            col_exp_hist1, col_exp_hist2, col_exp_hist3 = st.columns(3)
+            if col_exp_hist1.button("⬇️ Экспорт всей истории в TXT", use_container_width=True):
+                all_txt = ""
+                for item in filtered_history:
+                    all_txt += f"Дата: {item.get('timestamp', '')}\nЯзык: {item.get('language', '')}\nТекст:\n{item.get('text', '')}\n"
+                    if 'translated_text' in item:
+                        all_txt += f"Перевод:\n{item.get('translated_text', '')}\n"
+                    all_txt += "\n---\n"
+                txt_file = export_to_txt(all_txt)
+                with open(txt_file, "rb") as file:
+                    col_exp_hist1.download_button(
+                        label="Скачать TXT",
+                        data=file,
+                        file_name=txt_file,
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+            if col_exp_hist2.button("⬇️ Экспорт всей истории в DOCX", use_container_width=True):
+                doc = Document()
+                for item in filtered_history:
+                    doc.add_heading(f"Дата: {item.get('timestamp', '')}", level=2)
+                    doc.add_paragraph(f"Язык: {item.get('language', '')}")
+                    doc.add_paragraph("Текст:")
+                    doc.add_paragraph(item.get('text', ''))
+                    if 'translated_text' in item:
+                        doc.add_paragraph("Перевод:")
+                        doc.add_paragraph(item.get('translated_text', ''))
+                    doc.add_paragraph("---")
+                docx_file = f"history_{time.strftime('%Y%m%d-%H%M%S')}.docx"
+                doc.save(docx_file)
+                with open(docx_file, "rb") as file:
+                    col_exp_hist2.download_button(
+                        label="Скачать DOCX",
+                        data=file,
+                        file_name=docx_file,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True
+                    )
+            if col_exp_hist3.button("⬇️ Экспорт всей истории в PDF", use_container_width=True):
+                pdf = FPDF()
+                pdf.set_font("Arial", size=12)
+                for item in filtered_history:
+                    pdf.add_page()
+                    pdf.multi_cell(0, 10, f"Дата: {item.get('timestamp', '')}\nЯзык: {item.get('language', '')}\nТекст:\n{item.get('text', '')}")
+                    if 'translated_text' in item:
+                        pdf.ln(2)
+                        pdf.multi_cell(0, 10, f"Перевод:\n{item.get('translated_text', '')}")
+                    pdf.ln(2)
+                    pdf.multi_cell(0, 10, "---")
+                pdf_file = f"history_{time.strftime('%Y%m%d-%H%M%S')}.pdf"
+                pdf.output(pdf_file)
+                with open(pdf_file, "rb") as file:
+                    col_exp_hist3.download_button(
+                        label="Скачать PDF",
+                        data=file,
+                        file_name=pdf_file,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+            # Отображение истории
+            if not filtered_history:
+                st.info("Нет записей по выбранным фильтрам.")
+            else:
+                for i, item in enumerate(filtered_history):
+                    with st.expander(f"📝 **{item.get('timestamp', 'Неизвестно')}** | {item.get('language', 'Неизвестно')}"):
+                        display_translation_result(item, i, show_copy_buttons=True)
         else:
-            # Отображаем историю в виде карточек
-            for i, item in enumerate(history):
-                with st.expander(f"📝 **{item.get('timestamp', 'Неизвестно')}** | {item.get('language', 'Неизвестно')}"):
-                    display_translation_result(item, i)
+            st.info("📭 История пуста. Распознайте текст, чтобы увидеть историю.")
 
 # Функция для отображения истории перевода
-def display_translation_result(item, i):
+def display_translation_result(item, i, show_copy_buttons=False):
     col1, col2 = st.columns([3, 1])
-    
     with col1:
         st.markdown("#### 📄 Распознанный текст")
         st.markdown('<div class="result-container">', unsafe_allow_html=True)
         st.text_area("Оригинальный текст", item.get('text', ''), height=150, key=f"hist_text_{i}", label_visibility="collapsed")
+        if show_copy_buttons:
+            if st.button("📋 Копировать оригинал", key=f"copy_orig_{i}"):
+                st.session_state["copy_buffer"] = item.get('text', '')
+                st.toast("Текст скопирован!")
         st.markdown('</div>', unsafe_allow_html=True)
-        
         # Отображаем переведенный текст, если он есть
         if 'translated_text' in item:
             target_lang = item.get('target_language', '')
@@ -952,7 +1176,14 @@ def display_translation_result(item, i):
             st.markdown(f"#### 🌐 Перевод на {target_lang_name}")
             st.markdown('<div class="translated-container">', unsafe_allow_html=True)
             st.text_area("Переведенный текст", item.get('translated_text', ''), height=150, key=f"hist_trans_{i}", label_visibility="collapsed")
+            if show_copy_buttons:
+                if st.button("📋 Копировать перевод", key=f"copy_trans_{i}"):
+                    st.session_state["copy_buffer"] = item.get('translated_text', '')
+                    st.toast("Перевод скопирован!")
             st.markdown('</div>', unsafe_allow_html=True)
+        # Визуализация текста в истории
+        text_stats = analyze_text(item.get('text', ''))
+        show_text_visualizations(text_stats, item.get('text', ''), key_prefix=f"hist_{i}_")
     
     with col2:
         st.caption(f"⏱️ Время обработки: {item.get('processing_time', 'Неизвестно')}")
@@ -1030,6 +1261,19 @@ def display_translation_result(item, i):
                     st.markdown(f"* **{word}**: {count}")
             else:
                 st.info("Недостаточно данных для анализа")
+
+RATE_LIMIT = 10  # обработок в минуту
+if 'rate_limit' not in st.session_state:
+    st.session_state['rate_limit'] = []
+
+def check_rate_limit():
+    now = datetime.datetime.now()
+    # Удаляем старые записи
+    st.session_state['rate_limit'] = [t for t in st.session_state['rate_limit'] if (now - t).total_seconds() < 60]
+    if len(st.session_state['rate_limit']) >= RATE_LIMIT:
+        return False
+    st.session_state['rate_limit'].append(now)
+    return True
 
 if __name__ == "__main__":
     main() 
